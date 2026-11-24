@@ -85,6 +85,26 @@ class RedisAdapter
     ChassisState getChassisState();
 
     /**
+     * @brief Get Switch-Host state from STATE_DB
+     *
+     * Reads HOST_STATE|switch-host hash (owned by bmcctld).
+     *
+     * @return Host state if the key exists, nullopt otherwise
+     */
+    std::optional<HostStateInfo> getHostState();
+
+    /**
+     * @brief Get a rack manager command record from STATE_DB
+     *
+     * Reads RACK_MANAGER_COMMAND|<commandId> hash.
+     *
+     * @param commandId Command id (e.g., "CMD_1718000000_1")
+     * @return Command record if the key exists, nullopt otherwise
+     */
+    std::optional<RackManagerCommandInfo> getRackManagerCommand(
+        const std::string& commandId);
+
+    /**
      * @brief Get firmware versions from STATE_DB
      *
      * Reads BMC_FW_INVENTORY|* keys from STATE_DB on the switch
@@ -116,6 +136,23 @@ class RedisAdapter
      * @return Sensor info if found, nullopt otherwise
      */
     std::optional<LeakSensorInfo> getLeakSensor(const std::string& name);
+
+    /**
+     * @brief Get the trusted client certificate common names from CONFIG_DB
+     *
+     * Reads REDFISH|certs field client_crt_cname, a comma separated list of
+     * common names accepted for mTLS client authentication. Entries may be
+     * exact names or wildcards of the form *.example.com.
+     *
+     * The result distinguishes three states, because the caller must not
+     * treat an unreadable database as an unconfigured one:
+     *   - a value: the configured list
+     *   - an empty string: CONFIG_DB is readable and the field is not set
+     *   - no value: CONFIG_DB could not be read
+     *
+     * @return the configured value, or std::nullopt when the read failed
+     */
+    std::optional<std::string> getRedfishClientCnames();
 
   private:
     std::string configDbHost_;

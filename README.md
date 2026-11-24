@@ -215,6 +215,19 @@ Current patches:
    over D-Bus; falls back to `SONiCBMC` when unavailable)
 3. `0003-pin-sdbusplus-to-known-good-revision.patch` - Pins the sdbusplus wrap
 4. `0004-Integrate-SONiC-OEM-extension.patch` - Wires in the OEM extension (section 9)
+5. `0005-Integrate-rmc-events-leak-detection-into-bmcweb.patch` - Builds the
+   rmc-events leak detector monitor into bmcweb and serves the LeakDetection
+   resources and events
+6. `0006-Add-libcap-dependency-for-static-libsystemd.patch` - Links libcap, which
+   the static libsystemd needs
+7. `0007-Advertise-canonical-Chassis-LeakDetectors-collection.patch` - Links the
+   Chassis-level `LeakDetectors` collection from the Chassis resource
+8. `0008-Switch-Host-power-events-and-supported-ResetTypes.patch` - Sends host
+   power events and restricts `ComputerSystem.Reset` to the supported ResetTypes
+10. `0010-Remove-mTLS-session-when-its-connection-is-destroyed.patch` - Removes a
+   MutualTLS session together with its connection, closes idle HTTP/1
+   keep-alive and HTTP/2 connections, and enables TCP keepalive on event
+   streams
 
 To add a new patch:
 1. Make changes in bmcweb source directory.
@@ -627,7 +640,7 @@ Redis STATE_DB after the request:
 ```text
 root@sonic:/home/admin# redis-cli -n 6 HGETALL 'RACK_MANAGER_COMMAND|CMD_1775041067_000002'
 1) "command"
-2) "POWER_OFF"
+2) "GRACEFUL_SHUT"
 3) "status"
 4) "PENDING"
 5) "result"
@@ -661,9 +674,53 @@ root@sonic:/home/admin# redis-cli -n 6 HGETALL 'RACK_MANAGER_COMMAND|CMD_1775041
 
 `sonic-bmcctld` then transitions `status` to `IN_PROGRESS` and finally
 `DONE` or `FAILED`, writing a human-readable string into `result` on
-failure (e.g. `CRITICAL_LEAK_PRESENT`). Authoritative host power state
-is published by the daemon to `HOST_STATE|switch-host`
-(`device_power_state`, `device_status`, `last_change_timestamp`).
+failure (e.g. `CRITICAL_LEAK_PRESENT`). `sonic-dbus-bridge` subscribes to
+the published `RACK_MANAGER_COMMAND|CMD_<id>` key, logs the terminal
+status (`DONE` at NOTICE, `FAILED` at ERR) and releases the action slot.
+A command that does not reach a terminal status within the timeout is
+logged at ERR and the slot is released anyway.
+
+Authoritative host power state is published by the daemon to
+`HOST_STATE|switch-host` (`device_power_state`, `device_status`,
+`last_change_timestamp`). `sonic-dbus-bridge` mirrors it onto
+`xyz.openbmc_project.State.Host` (`CurrentHostState`, object `host0`),
+which is what `GET /redfish/v1/Systems/system` reports as `PowerState`:
+
+| `device_power_state`      | `device_status` | `CurrentHostState`        | Redfish `PowerState` |
+|---------------------------|-----------------|---------------------------|----------------------|
+| `POWERING_ON`             | (ignored)       | `TransitioningToRunning`  | `PoweringOn`         |
+| `POWERING_OFF`            | (ignored)       | `TransitioningToOff`      | `PoweringOff`        |
+| `GRACEFUL_SHUTTING_DOWN`  | (ignored)       | `TransitioningToOff`      | `PoweringOff`        |
+| `POWER_CYCLING`           | (ignored)       | `TransitioningToRunning`  | `PoweringOn`         |
+| `POWERED_ON`              | `ONLINE`        | `Running`                 | `On`                 |
+| `POWERED_OFF`             | `OFFLINE`       | `Off`                     | `Off`                |
+| `GRACEFUL_SHUTDOWN`       | `OFFLINE`       | `Off`                     | `Off`                |
+| `POWER_CYCLE`             | `ONLINE`        | `Running`                 | `On`                 |
+| any stable state          | conflicting     | follows `device_status`   |                      |
+| unrecognised              | `ONLINE`/`OFFLINE` | `Running`/`Off`        |                      |
+| unrecognised              | unrecognised    | unchanged                 |                      |
+
+Only the `ResetType` values below are accepted. Any other value (e.g.
+`ForceOn`, `ForceRestart`, `GracefulRestart`, `Nmi`) returns
+`400 Base.ActionParameterNotSupported`:
+
+| `ResetType`        | D-Bus transition                               | `RACK_MANAGER_COMMAND` |
+|--------------------|------------------------------------------------|------------------------|
+| `On`               | `xyz.openbmc_project.State.Host.Transition.On`     | `POWER_ON`         |
+| `ForceOff`         | `xyz.openbmc_project.State.Chassis.Transition.Off` | `POWER_OFF`        |
+| `GracefulShutdown` | `xyz.openbmc_project.State.Host.Transition.Off`    | `GRACEFUL_SHUT`    |
+| `PowerCycle`       | `xyz.openbmc_project.State.Host.Transition.Reboot` | `POWER_CYCLE`      |
+
+Each `CurrentHostState` change is also delivered to Redfish event
+subscribers (`POST /redfish/v1/EventService/Subscriptions`) as a
+`ResourceEvent` message (`ResourcePoweringOn`, `ResourcePoweredOn`,
+`ResourcePoweringOff`, `ResourcePoweredOff`) with `OriginOfCondition`
+`/redfish/v1/Systems/system`. Subscriptions may filter on
+`RegistryPrefixes: ["ResourceEvent"]` or `ResourceTypes: ["ComputerSystem"]`.
+
+The state and `ResetType` mapping tables live in
+`sonic-dbus-bridge/include/host_state_mapping.hpp` and are covered by
+`tests/unit-tests/host_state_mapping_test.cpp` (`make unit-test`).
 
 <sub>[^ Back to Table of Contents](#table-of-contents)</sub>
 

@@ -9,6 +9,7 @@
 ///////////////////////////////////////
 
 #include "redis_adapter.hpp"
+#include "host_state_mapping.hpp"
 #include "logger.hpp"
 #include <cstring>
 #include <fstream>
@@ -202,6 +203,52 @@ ChassisState RedisAdapter::getChassisState()
     return state;
 }
 
+std::optional<HostStateInfo> RedisAdapter::getHostState()
+{
+    if (!stateDbContext_)
+    {
+        return std::nullopt;
+    }
+
+    auto fields = hgetall(stateDbContext_,
+                          std::string(host_state::KEY_HOST_STATE));
+    if (fields.empty())
+    {
+        return std::nullopt;
+    }
+
+    HostStateInfo info;
+    info.devicePowerState = fields[std::string(host_state::FIELD_DEVICE_POWER_STATE)];
+    info.deviceStatus = fields[std::string(host_state::FIELD_DEVICE_STATUS)];
+    info.lastChangeTimestamp = fields["last_change_timestamp"];
+    return info;
+}
+
+std::optional<RackManagerCommandInfo> RedisAdapter::getRackManagerCommand(
+    const std::string& commandId)
+{
+    if (!stateDbContext_ || commandId.empty())
+    {
+        return std::nullopt;
+    }
+
+    std::string key =
+        std::string(host_state::TABLE_RACK_MANAGER_COMMAND) + "|" + commandId;
+    auto fields = hgetall(stateDbContext_, key);
+    if (fields.empty())
+    {
+        return std::nullopt;
+    }
+
+    RackManagerCommandInfo info;
+    info.commandId = commandId;
+    info.command = fields[std::string(host_state::FIELD_COMMAND)];
+    info.status = fields[std::string(host_state::FIELD_STATUS)];
+    info.result = fields[std::string(host_state::FIELD_RESULT)];
+    info.lastChangeTimestamp = fields["last_change_timestamp"];
+    return info;
+}
+
 std::map<std::string, std::string> RedisAdapter::hgetall(redisContext* ctx,
                                                           const std::string& key)
 {
@@ -228,6 +275,57 @@ std::map<std::string, std::string> RedisAdapter::hgetall(redisContext* ctx,
         }
     }
     
+    freeReplyObject(reply);
+    return result;
+}
+
+std::optional<std::string> RedisAdapter::getRedfishClientCnames()
+{
+    // Read directly rather than through hget(), which cannot distinguish a
+    // field that is not set from a read that failed. That difference decides
+    // whether client certificates are accepted, so it must not be lost.
+    if (!configDbContext_)
+    {
+        // Not connected at startup, or dropped after an I/O error below.
+        configDbContext_ = connectToDb(configDbHost_, configDbPort_, 4);
+        if (!configDbContext_)
+        {
+            return std::nullopt;
+        }
+    }
+
+    redisReply* reply = static_cast<redisReply*>(
+        redisCommand(configDbContext_, "HGET %s %s", "REDFISH|certs",
+                     "client_crt_cname"));
+    if (!reply)
+    {
+        // hiredis leaves the context unusable after an I/O error, so drop it
+        // and reconnect on the next read.
+        LOG_WARNING("CONFIG_DB read of client_crt_cname failed: %s",
+                    configDbContext_->errstr);
+        redisFree(configDbContext_);
+        configDbContext_ = nullptr;
+        return std::nullopt;
+    }
+
+    std::optional<std::string> result;
+    if (reply->type == REDIS_REPLY_STRING)
+    {
+        result = std::string(reply->str, reply->len);
+    }
+    else if (reply->type == REDIS_REPLY_NIL)
+    {
+        result = std::string(); // readable, field not set
+    }
+    else
+    {
+        // An error reply (e.g. LOADING while Redis starts) is a failed read,
+        // not an unset field.
+        LOG_WARNING("CONFIG_DB read of client_crt_cname failed: %s",
+                    reply->type == REDIS_REPLY_ERROR ? reply->str
+                                                     : "unexpected reply type");
+    }
+
     freeReplyObject(reply);
     return result;
 }

@@ -4,6 +4,7 @@
 # Copyright (C) 2026 SONiC Project
 # Author: Nexthop AI
 # Author: SONiC Project
+# Author: Chinmoy Dey <chinmoy@nexthop.ai>
 # License file: sonic-redfish/LICENSE
 #######################################
 
@@ -41,6 +42,11 @@ conf_data.set_quoted(
     'STATE_HOST_BUSNAME',
     'xyz.openbmc_project.State.Host',
     description: 'The D-Bus busname for host state management.',
+)
+conf_data.set_quoted(
+    'STATE_CHASSIS_BUSNAME',
+    'xyz.openbmc_project.State.Chassis',
+    description: 'The D-Bus busname for chassis state management (served by the State.Host connection).',
 )
 conf_data.set_quoted(
     'RACK_MANAGER_BUSNAME',
@@ -105,6 +111,15 @@ executable(
         sdbusplus_dep,
     ],
     link_args: ['-lcrypt'],
+    install: true,
+    install_dir: get_option('bindir'),
+)
+
+# Socket activation helper: binds the configured port and hands it to bmcweb,
+# which otherwise falls back to a port compiled into the binary.
+executable(
+    'bmcweb-activate',
+    'src/bmcweb_activate.cpp',
     install: true,
     install_dir: get_option('bindir'),
 )
